@@ -212,7 +212,7 @@ async def doc(bot, update):
 
     # Generate 1-minute sample video if enabled
     sample_path = None
-    enable_sample = os.getenv("ENABLE_SAMPLE_VIDEO", "False").lower() == "true"
+    enable_sample = os.getenv("ENABLE_SAMPLE_VIDEO", "True").lower() == "true"
     if enable_sample and file.media == MessageMediaType.VIDEO:
         try:
             sample_filename = f"Renames/sample_{new_filename}"
