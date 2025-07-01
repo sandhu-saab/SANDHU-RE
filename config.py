@@ -144,7 +144,7 @@ V𝟹.𝟶.𝟶 [STABLE]
 --change-subtitle-title [OttSandhu]
 --change-author [OttSandhu]`
 
-📥 Fᴏʀ Hᴇʟᴘ Cᴏɴᴛ. @Digital_Botz
+📥 Fᴏʀ Hᴇʟᴘ Cᴏɴᴛ. @Baii_Ji
 """
     
     CUSTOM_FILE_NAME = """
