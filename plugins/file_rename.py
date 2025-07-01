@@ -18,7 +18,8 @@ from config import Config
 
 # extra imports
 from asyncio import sleep
-import os, time, asyncio, logging
+import os, time, asyncio, logging, shutil
+import ffmpeg
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -47,10 +48,8 @@ async def rename_start(client, message):
             limit = user_data.get('uploadlimit', DEFAULT_LIMIT)
             used = user_data.get('used_limit', 0)
             
-            # Log values for debugging
             logger.info(f"User ID: {user_id}, Used: {used}, Limit: {limit}")
 
-            # Fix for ZeroDivisionError
             if int(limit) == 0:
                 used_percentage = 0
                 logger.warning(f"Limit is zero for user {user_id}, setting used_percentage to 0")
@@ -66,11 +65,10 @@ async def rename_start(client, message):
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🪪 Uᴘɢʀᴀᴅᴇ", callback_data="plans")]])
                 )
 
-        # Common reply text for both premium and non-premium
         reply_text = (
             f"**__ᴍᴇᴅɪᴀ ɪɴꜰᴏ:\n\n"
             f"◈ ᴏʟᴅ ꜰɪʟᴇ ɴᴀᴍᴇ: `{filename}`\n\n"
-            f"◈ ᴇxᴛᴇɴꜱɪᴏɴ: `{extension_type.upper()}`\n"
+            f"◈ ᴇxᴛᴇɴsɪᴏɴ: `{extension_type.upper()}`\n"
             f"◈ ꜰɪʟᴇ ꜱɪᴢᴇ: `{filesize}`\n"
             f"◈ ᴍɪᴍᴇ ᴛʏᴇᴩ: `{mime_type}`\n"
             f"◈ ᴅᴄ ɪᴅ: `{dcid}`\n\n"
@@ -144,6 +142,11 @@ async def doc(bot, update):
     if not os.path.isdir("Renames"):
         os.mkdir("Renames")
 
+    # Check disk space
+    total, used, free = shutil.disk_usage("/")
+    if free < 2000000000:  # 2GB free space required
+        return await rkn_processing.edit("⚠️ Not enough disk space. Upgrade to Performance dyno.")
+
     user_id = int(update.message.chat.id)
     new_name = update.message.text
     new_filename_ = new_name.split(":-")[1].strip()
@@ -177,35 +180,52 @@ async def doc(bot, update):
         total_used = int(used) + int(media.file_size)
         await digital_botz.set_used_limit(user_id, total_used)
 
-    try:
-        dl_path = await bot.download_media(
+    # Parallel download and metadata prep
+    async def download_file():
+        return await bot.download_media(
             message=file,
             file_name=file_path,
             progress=progress_for_pyrogram,
             progress_args=(DOWNLOAD_TEXT, rkn_processing, time.time())
         )
+
+    async def prepare_metadata():
+        if await digital_botz.get_metadata_mode(user_id):
+            metadata = await digital_botz.get_metadata_code(user_id)
+            if metadata and change_metadata(file_path, metadata_path, metadata):
+                return metadata_path
+        return file_path
+
+    try:
+        download_task = asyncio.create_task(download_file())
+        metadata_task = asyncio.create_task(prepare_metadata())
+        dl_path = await download_task
+        final_path = await metadata_task
     except Exception as e:
         if bot.premium and bot.uploadlimit:
             used_remove = int(used) - int(media.file_size)
             await digital_botz.set_used_limit(user_id, used_remove)
-        logger.error(f"Download error: {str(e)}")
-        return await rkn_processing.edit(f"Download error: {e}")
+        logger.error(f"Download or metadata error: {str(e)}")
+        return await rkn_processing.edit(f"Error: {e}")
 
-    metadata_mode = await digital_botz.get_metadata_mode(user_id)
-    if metadata_mode:
-        metadata = await digital_botz.get_metadata_code(user_id)
-        if metadata:
-            await rkn_processing.edit("I Fᴏᴜɴᴅ Yᴏᴜʀ Mᴇᴛᴀᴅᴀᴛᴀ\n\n__**Pʟᴇᴀsᴇ Wᴀɪᴛ...**__\n**Aᴅᴅɪɴɢ Mᴇᴛᴀᴅᴀᴛᴀ Tᴏ Fɪʟᴇ....**")
-            if change_metadata(dl_path, metadata_path, metadata):
-                await rkn_processing.edit("Metadata Added.....")
-                logger.info("Metadata Added.....")
-        await rkn_processing.edit("**Metadata added to the file successfully ✅**\n\n**Tʀyɪɴɢ Tᴏ Uᴩʟᴏᴀᴅɪɴɢ....**")
-    else:
-        await rkn_processing.edit("`Try To Uploading....`")
+    await rkn_processing.edit("`Try To Uploading....`") if not await digital_botz.get_metadata_mode(user_id) else await rkn_processing.edit("**Metadata added to the file successfully ✅**\n\n**Tʀyɪɴɢ Tᴏ Uᴩʟᴏᴀᴅɪɴɢ....**")
+
+    # Generate 1-minute sample video if enabled
+    sample_path = None
+    enable_sample = os.getenv("ENABLE_SAMPLE_VIDEO", "False").lower() == "true"
+    if enable_sample and file.media == MessageMediaType.VIDEO:
+        try:
+            sample_filename = f"Renames/sample_{new_filename}"
+            ffmpeg.input(final_path, ss=0, t=60).output(sample_filename, vcodec='copy', acodec='copy', loglevel="quiet").run()
+            sample_path = sample_filename
+            await rkn_processing.edit("`Sample video generated, uploading now...`")
+        except Exception as e:
+            logger.error(f"Sample video generation error: {str(e)}")
+            sample_path = None
 
     duration = 0
     try:
-        parser = createParser(file_path)
+        parser = createParser(final_path)
         if parser:
             metadata = extractMetadata(parser)
             if metadata and metadata.has("duration"):
@@ -220,12 +240,7 @@ async def doc(bot, update):
 
     if c_caption:
         try:
-            # Adding custom caption
-            caption = c_caption.format(
-                filename=new_filename,
-                filesize=humanbytes(media.file_size),
-                duration=convert(duration)
-            )
+            caption = c_caption.format(filename=new_filename, filesize=humanbytes(media.file_size), duration=convert(duration))
         except Exception as e:
             if bot.premium and bot.uploadlimit:
                 used_remove = int(used) - int(media.file_size)
@@ -250,37 +265,29 @@ async def doc(bot, update):
             ph_path = None
 
     type = update.data.split("_")[1]
+    async def send_with_retry(method, *args, retries=3, **kwargs):
+        for i in range(retries):
+            try:
+                return await method(*args, **kwargs)
+            except ConnectionResetError:
+                if i == retries - 1:
+                    raise
+                await asyncio.sleep(2 ** i)
+
     try:
         if media.file_size > 2000 * 1024 * 1024:
             if type == "document":
-                filw = await app.send_document(
-                    Config.LOG_CHANNEL,
-                    document=metadata_path if metadata_mode else file_path,
-                    thumb=ph_path,
-                    caption=caption,
-                    progress=progress_for_pyrogram,
-                    progress_args=(UPLOAD_TEXT, rkn_processing, time.time())
-                )
+                filw = await send_with_retry(app.send_document, Config.LOG_CHANNEL, document=final_path, thumb=ph_path, caption=caption, progress=progress_for_pyrogram, progress_args=(UPLOAD_TEXT, rkn_processing, time.time()))
+                if sample_path:
+                    await send_with_retry(app.send_document, Config.LOG_CHANNEL, document=sample_path, thumb=ph_path, caption=f"Sample - {caption}", progress=progress_for_pyrogram, progress_args=(UPLOAD_TEXT, rkn_processing, time.time()))
             elif type == "video":
-                filw = await app.send_video(
-                    Config.LOG_CHANNEL,
-                    video=metadata_path if metadata_mode else file_path,
-                    caption=caption,
-                    thumb=ph_path,
-                    duration=duration,
-                    progress=progress_for_pyrogram,
-                    progress_args=(UPLOAD_TEXT, rkn_processing, time.time())
-                )
+                filw = await send_with_retry(app.send_video, Config.LOG_CHANNEL, video=final_path, caption=caption, thumb=ph_path, duration=duration, progress=progress_for_pyrogram, progress_args=(UPLOAD_TEXT, rkn_processing, time.time()))
+                if sample_path:
+                    await send_with_retry(app.send_video, Config.LOG_CHANNEL, video=sample_path, caption=f"Sample - {caption}", thumb=ph_path, duration=60, progress=progress_for_pyrogram, progress_args=(UPLOAD_TEXT, rkn_processing, time.time()))
             elif type == "audio":
-                filw = await app.send_audio(
-                    Config.LOG_CHANNEL,
-                    audio=metadata_path if metadata_mode else file_path,
-                    caption=caption,
-                    thumb=ph_path,
-                    duration=duration,
-                    progress=progress_for_pyrogram,
-                    progress_args=(UPLOAD_TEXT, rkn_processing, time.time())
-                )
+                filw = await send_with_retry(app.send_audio, Config.LOG_CHANNEL, audio=final_path, caption=caption, thumb=ph_path, duration=duration, progress=progress_for_pyrogram, progress_args=(UPLOAD_TEXT, rkn_processing, time.time()))
+                if sample_path:
+                    await send_with_retry(app.send_audio, Config.LOG_CHANNEL, audio=sample_path, caption=f"Sample - {caption}", thumb=ph_path, duration=60, progress=progress_for_pyrogram, progress_args=(UPLOAD_TEXT, rkn_processing, time.time()))
             from_chat = filw.chat.id
             mg_id = filw.id
             await sleep(2)
@@ -288,43 +295,26 @@ async def doc(bot, update):
             await bot.delete_messages(from_chat, mg_id)
         else:
             if type == "document":
-                await bot.send_document(
-                    update.message.chat.id,
-                    document=metadata_path if metadata_mode else file_path,
-                    thumb=ph_path,
-                    caption=caption,
-                    progress=progress_for_pyrogram,
-                    progress_args=(UPLOAD_TEXT, rkn_processing, time.time())
-                )
+                await bot.send_document(update.message.chat.id, document=final_path, thumb=ph_path, caption=caption, progress=progress_for_pyrogram, progress_args=(UPLOAD_TEXT, rkn_processing, time.time()))
+                if sample_path:
+                    await bot.send_document(update.message.chat.id, document=sample_path, thumb=ph_path, caption=f"Sample - {caption}", progress=progress_for_pyrogram, progress_args=(UPLOAD_TEXT, rkn_processing, time.time()))
             elif type == "video":
-                await bot.send_video(
-                    update.message.chat.id,
-                    video=metadata_path if metadata_mode else file_path,
-                    caption=caption,
-                    thumb=ph_path,
-                    duration=duration,
-                    progress=progress_for_pyrogram,
-                    progress_args=(UPLOAD_TEXT, rkn_processing, time.time())
-                )
+                await bot.send_video(update.message.chat.id, video=final_path, caption=caption, thumb=ph_path, duration=duration, progress=progress_for_pyrogram, progress_args=(UPLOAD_TEXT, rkn_processing, time.time()))
+                if sample_path:
+                    await bot.send_video(update.message.chat.id, video=sample_path, caption=f"Sample - {caption}", thumb=ph_path, duration=60, progress=progress_for_pyrogram, progress_args=(UPLOAD_TEXT, rkn_processing, time.time()))
             elif type == "audio":
-                await bot.send_audio(
-                    update.message.chat.id,
-                    audio=metadata_path if metadata_mode else file_path,
-                    caption=caption,
-                    thumb=ph_path,
-                    duration=duration,
-                    progress=progress_for_pyrogram,
-                    progress_args=(UPLOAD_TEXT, rkn_processing, time.time())
-                )
+                await bot.send_audio(update.message.chat.id, audio=final_path, caption=caption, thumb=ph_path, duration=duration, progress=progress_for_pyrogram, progress_args=(UPLOAD_TEXT, rkn_processing, time.time()))
+                if sample_path:
+                    await bot.send_audio(update.message.chat.id, audio=sample_path, caption=f"Sample - {caption}", thumb=ph_path, duration=60, progress=progress_for_pyrogram, progress_args=(UPLOAD_TEXT, rkn_processing, time.time()))
     except Exception as e:
         if bot.premium and bot.uploadlimit:
             used_remove = int(used) - int(media.file_size)
             await digital_botz.set_used_limit(user_id, used_remove)
         logger.error(f"Upload error: {str(e)}")
-        await remove_path(ph_path, file_path, dl_path, metadata_path)
+        await remove_path(ph_path, file_path, dl_path, metadata_path, sample_path)
         return await rkn_processing.edit(f"Eʀʀᴏʀ {e}")
 
-    await remove_path(ph_path, file_path, dl_path, metadata_path)
+    await remove_path(ph_path, file_path, dl_path, metadata_path, sample_path)
     return await rkn_processing.edit("Uploaded Successfully....")
 
 # please give credit 🙏🥲
