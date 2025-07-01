@@ -10,3 +10,4 @@ psutil
 pyromod
 ffmpeg-python
 ffmpeg
+pip install -r
